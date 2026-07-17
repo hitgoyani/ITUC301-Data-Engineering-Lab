@@ -1,0 +1,7 @@
+# Data Engineering Ingestion Configurations
+ingest_batch_size = 100
+quarantine_enabled = true
+sqlite_db_name = ecommerce.db
+validation_level = STRICT
+api_timeout_sec = 5
+max_retry_attempts = 3
