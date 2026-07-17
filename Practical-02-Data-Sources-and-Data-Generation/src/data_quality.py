@@ -44,7 +44,7 @@ def clean_and_validate_customers():
     csv_src = os.path.join(DATASETS_DIR, "customers.csv")
     if not os.path.exists(csv_src):
         logger.error(f"Source customers.csv not found at {csv_src}")
-        return [], []
+        return [], {"total": 0, "clean": 0, "duplicate_id": 0, "missing_fields": 0, "malformed_email": 0}
         
     df = pd.read_csv(csv_src, dtype=str).fillna("")
     
@@ -134,7 +134,7 @@ def clean_and_validate_transactions(valid_customer_ids):
     json_src = os.path.join(DATASETS_DIR, "transactions.json")
     if not os.path.exists(json_src):
         logger.error(f"Source transactions.json not found at {json_src}")
-        return [], []
+        return [], {"total": 0, "clean": 0, "missing_ids": 0, "duplicate_id": 0, "invalid_amount": 0, "foreign_key_violation": 0}
         
     with open(json_src, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -221,20 +221,101 @@ def clean_and_validate_transactions(valid_customer_ids):
     logger.info(f"Transaction validation completed: {stats['clean']} clean, {len(quarantined_transactions)} quarantined of {stats['total']} total.")
     return clean_transactions, stats
 
+def run_supplementary_validation():
+    """Parses messy files directory, isolates records missing primary keys (user_id), and logs warnings."""
+    logger.info("=== Starting Supplementary Ingestion Validation Routine ===")
+    
+    messy_dir = os.path.join(DATASETS_DIR, "messy_files")
+    if not os.path.exists(messy_dir):
+        logger.error(f"Messy files directory not found at {messy_dir}")
+        return {"total": 0, "clean": 0, "quarantined": 0}
+        
+    clean_records = []
+    quarantined_records = []
+    
+    for file_name in os.listdir(messy_dir):
+        file_path = os.path.join(messy_dir, file_name)
+        logger.info(f"Parsing supplementary input file: {file_name}")
+        
+        if file_name.endswith(".csv"):
+            try:
+                df = pd.read_csv(file_path, dtype=str).fillna("")
+                for idx, row in df.iterrows():
+                    user_id = str(row.get("user_id", "")).strip()
+                    record = dict(row)
+                    record["source_file"] = file_name
+                    
+                    if not user_id:
+                        logger.warning(f"File '{file_name}' Row {idx+2}: Quarantined - Missing primary key 'user_id'.")
+                        record["quarantine_reason"] = "Missing primary key 'user_id'"
+                        quarantined_records.append(record)
+                    else:
+                        clean_records.append(record)
+            except Exception as e:
+                logger.error(f"Error parsing CSV file {file_name}: {e}")
+                
+        elif file_name.endswith(".json"):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                if isinstance(data, list):
+                    for idx, item in enumerate(data):
+                        user_id = str(item.get("user_id", "")).strip() if item.get("user_id") is not None else ""
+                        record = dict(item)
+                        record["source_file"] = file_name
+                        
+                        if not user_id:
+                            logger.warning(f"File '{file_name}' Item {idx+1}: Quarantined - Missing primary key 'user_id'.")
+                            record["quarantine_reason"] = "Missing primary key 'user_id'"
+                            quarantined_records.append(record)
+                        else:
+                            clean_records.append(record)
+            except Exception as e:
+                logger.error(f"Error parsing JSON file {file_name}: {e}")
+                
+    # Write clean messy users
+    clean_csv = os.path.join(DATASETS_DIR, "clean_messy_users.csv")
+    if clean_records:
+        with open(clean_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["user_id", "username", "signup_date", "source_file"])
+            writer.writeheader()
+            writer.writerows(clean_records)
+        logger.info(f"Processed {len(clean_records)} clean messy records. Saved to {clean_csv}")
+    else:
+        with open(clean_csv, "w", newline="", encoding="utf-8") as f:
+            f.write("")
+            
+    # Write quarantined messy users
+    quarantine_csv = os.path.join(DATASETS_DIR, "quarantined_messy_users.csv")
+    if quarantined_records:
+        with open(quarantine_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["user_id", "username", "signup_date", "source_file", "quarantine_reason"])
+            writer.writeheader()
+            writer.writerows(quarantined_records)
+        logger.info(f"Isolated {len(quarantined_records)} quarantined messy records. Saved to {quarantine_csv}")
+    else:
+        with open(quarantine_csv, "w", newline="", encoding="utf-8") as f:
+            f.write("")
+            
+    logger.info("=== Supplementary Ingestion Validation Routine Completed ===")
+    return {
+        "total": len(clean_records) + len(quarantined_records),
+        "clean": len(clean_records),
+        "quarantined": len(quarantined_records)
+    }
+
 def ingest_to_sqlite(clean_customers, clean_transactions):
     """Initializes SQLite database and inserts validated clean records inside a transactional database block."""
     logger.info("=== Starting SQLite Database Ingestion ===")
     
     db_file = os.path.join(OUTPUT_DIR, "ecommerce.db")
     
-    # Connect and configure database connection
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     
-    # Enable foreign keys support in SQLite
     cursor.execute("PRAGMA foreign_keys = ON;")
     
-    # Create tables with explicit constraints
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS customers (
             customer_id TEXT PRIMARY KEY,
@@ -255,20 +336,16 @@ def ingest_to_sqlite(clean_customers, clean_transactions):
         );
     """)
     
-    # Ingest inside a SQL transaction block
     try:
-        # Clear existing data to allow re-runs of verification
         cursor.execute("DELETE FROM transactions;")
         cursor.execute("DELETE FROM customers;")
         
-        # Insert customers
         for cust in clean_customers:
             cursor.execute("""
                 INSERT INTO customers (customer_id, name, email, phone, city)
                 VALUES (?, ?, ?, ?, ?);
             """, (cust["customer_id"], cust["name"], cust["email"], cust["phone"], cust["city"]))
             
-        # Insert transactions
         for txn in clean_transactions:
             cursor.execute("""
                 INSERT INTO transactions (transaction_id, customer_id, amount, date)
@@ -283,11 +360,10 @@ def ingest_to_sqlite(clean_customers, clean_transactions):
     finally:
         conn.close()
 
-def generate_quality_report(c_stats, t_stats):
+def generate_quality_report(c_stats, t_stats, s_stats):
     """Generates a summary data quality Markdown report including tables and pipeline execution log captures."""
     report_file = os.path.join(OUTPUT_DIR, "data_quality_report.md")
     
-    # Read the data quality logs to include in report
     with open(log_file_path, "r", encoding="utf-8") as f:
         log_lines = f.read()
         
@@ -302,8 +378,8 @@ This report summarizes the data quality checks, structural validation outcomes, 
 | Category | Record Count | Percentage |
 | :--- | :---: | :---: |
 | **Total Ingested Records** | {c_stats["total"]} | 100.0% |
-| **Clean Accepted Records** | {c_stats["clean"]} | {c_stats["clean"]/c_stats["total"]*100:.1f}% |
-| **Quarantined Records** | {c_stats["total"] - c_stats["clean"]} | {(c_stats["total"] - c_stats["clean"])/c_stats["total"]*100:.1f}% |
+| **Clean Accepted Records** | {c_stats["clean"]} | {c_stats["clean"]/c_stats["total"]*100 if c_stats["total"] else 0:.1f}% |
+| **Quarantined Records** | {c_stats["total"] - c_stats["clean"]} | {(c_stats["total"] - c_stats["clean"])/c_stats["total"]*100 if c_stats["total"] else 0:.1f}% |
 
 ### Discovered Customer Validation Failures
 | Failure Reason | Occurrences |
@@ -321,8 +397,8 @@ This report summarizes the data quality checks, structural validation outcomes, 
 | Category | Record Count | Percentage |
 | :--- | :---: | :---: |
 | **Total Ingested Records** | {t_stats["total"]} | 100.0% |
-| **Clean Accepted Records** | {t_stats["clean"]} | {t_stats["clean"]/t_stats["total"]*100:.1f}% |
-| **Quarantined Records** | {t_stats["total"] - t_stats["clean"]} | {(t_stats["total"] - t_stats["clean"])/t_stats["total"]*100:.1f}% |
+| **Clean Accepted Records** | {t_stats["clean"]} | {t_stats["clean"]/t_stats["total"]*100 if t_stats["total"] else 0:.1f}% |
+| **Quarantined Records** | {t_stats["total"] - t_stats["clean"]} | {(t_stats["total"] - t_stats["clean"])/t_stats["total"]*100 if t_stats["total"] else 0:.1f}% |
 
 ### Discovered Transaction Validation Failures
 | Failure Reason | Occurrences |
@@ -336,7 +412,19 @@ This report summarizes the data quality checks, structural validation outcomes, 
 
 ---
 
-## 3. Data Quality Pipeline Execution Log
+## 3. Supplementary Ingestion Validation Summary (Messy User Files)
+
+| Category | Record Count | Percentage |
+| :--- | :---: | :---: |
+| **Total Input Records** | {s_stats["total"]} | 100.0% |
+| **Clean Accepted Records** | {s_stats["clean"]} | {s_stats["clean"]/s_stats["total"]*100 if s_stats["total"] else 0:.1f}% |
+| **Quarantined Records (Missing `user_id` Primary Key)** | {s_stats["quarantined"]} | {s_stats["quarantined"]/s_stats["total"]*100 if s_stats["total"] else 0:.1f}% |
+
+*Failed messy user records have been isolated and written to `datasets/quarantined_messy_users.csv`.*
+
+---
+
+## 4. Data Quality Pipeline Execution Log
 
 Below is the complete audit execution log recorded by the python logging module during runtime:
 
@@ -356,13 +444,16 @@ if __name__ == "__main__":
     clean_custs, cust_stats = clean_and_validate_customers()
     clean_cust_ids = {c["customer_id"] for c in clean_custs}
     
-    # 2. Clean and validate transactions (injecting clean customer IDs to check ref integrity)
+    # 2. Clean and validate transactions
     clean_txns, txn_stats = clean_and_validate_transactions(clean_cust_ids)
     
-    # 3. Load clean, validated records into SQLite database
+    # 3. Run supplementary validation on messy directory
+    supp_stats = run_supplementary_validation()
+    
+    # 4. Load clean, validated records into SQLite database
     if clean_custs or clean_txns:
         ingest_to_sqlite(clean_custs, clean_txns)
         
-    # 4. Generate markdown report
-    generate_quality_report(cust_stats, txn_stats)
+    # 5. Generate markdown report
+    generate_quality_report(cust_stats, txn_stats, supp_stats)
     logger.info("=== Data Quality Pipeline Process Completed ===")

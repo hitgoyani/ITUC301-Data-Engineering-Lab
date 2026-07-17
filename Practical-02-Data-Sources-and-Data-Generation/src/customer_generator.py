@@ -188,10 +188,42 @@ max_retry_attempts = 3
         f.write(config_content)
     logger.info(f"Saved unstructured configuration to {dest_path}")
 
+def generate_messy_files():
+    """Generate messy user files for the supplementary validation problem."""
+    logger.info("Generating messy files for supplementary validation problem...")
+    messy_dir = os.path.join(DATASETS_DIR, "messy_files")
+    os.makedirs(messy_dir, exist_ok=True)
+    
+    # File 1: messy CSV
+    file1_rows = [
+        {"user_id": "USR0001", "username": "john_doe", "signup_date": "2026-01-01"},
+        {"user_id": "", "username": "missing_pk_user1", "signup_date": "2026-01-02"},  # Missing PK
+        {"user_id": "USR0002", "username": "jane_smith", "signup_date": "2026-01-03"},
+        {"user_id": "  ", "username": "missing_pk_user2", "signup_date": "2026-01-04"},  # Empty spaces PK
+    ]
+    csv_path = os.path.join(messy_dir, "messy_users_1.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["user_id", "username", "signup_date"])
+        writer.writeheader()
+        writer.writerows(file1_rows)
+        
+    # File 2: messy JSON
+    file2_rows = [
+        {"user_id": "USR0003", "username": "bob_johnson", "signup_date": "2026-01-05"},
+        {"user_id": None, "username": "missing_pk_user3", "signup_date": "2026-01-06"},  # Missing PK
+        {"user_id": "USR0004", "username": "alice_brown", "signup_date": "2026-01-07"},
+    ]
+    json_path = os.path.join(messy_dir, "messy_users_2.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(file2_rows, f, indent=2)
+        
+    logger.info(f"Generated messy files inside {messy_dir}")
+
 if __name__ == "__main__":
     logger.info("=== Starting Data Generation Engine ===")
     fetch_api_data()
     customer_list = generate_customers()
     generate_transactions(customer_list)
     generate_config()
+    generate_messy_files()
     logger.info("=== Data Generation Completed Successfully ===")
