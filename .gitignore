@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite3-journal
+
+# Datasets & logs to prevent committing large files
+*.csv
+*.json
+*.log
+!**/.gitkeep
+!Practical-01-Data-Engineering-Lifecycle/Data_Engineering_Lifecycle.png
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# PDFs
+*.pdf
